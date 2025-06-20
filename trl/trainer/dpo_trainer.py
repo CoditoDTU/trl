@@ -166,6 +166,14 @@ class DataCollatorForPreference(DataCollatorMixin):
             output["ref_chosen_logps"] = ref_chosen_logps
             output["ref_rejected_logps"] = ref_rejected_logps
 
+        # --- START MODIFICATION ---
+        # This new block checks if 'epsilon' is in your dataset.
+        # If it is, it converts the list of epsilon values into a tensor
+        # and adds it to the batch that will be fed into the model.
+        if "epsilon" in examples[0]:
+            output["epsilon"] = torch.tensor([example["epsilon"] for example in examples])
+        # --- END MODIFICATION ---
+
         return output
 
 
@@ -763,6 +771,10 @@ class DPOTrainer(Trainer):
                 "image_sizes",
                 "ref_chosen_logps",
                 "ref_rejected_logps",
+                # --- START MODIFICATION ---
+                # Add "epsilon" to the list of columns to keep.
+                "epsilon",
+                # --- END MODIFICATION ---
             ]
 
     def get_train_dataloader(self) -> DataLoader:
@@ -972,6 +984,9 @@ class DPOTrainer(Trainer):
         rejected_logps: torch.FloatTensor,
         ref_chosen_logps: torch.FloatTensor,
         ref_rejected_logps: torch.FloatTensor,
+        # --- START MODIFICATION ---
+        epsilon: Optional[torch.FloatTensor] = None
+        # --- END MODIFICATION ---
     ) -> tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
         """
         Compute the DPO loss for a batch of policy and reference model log probabilities.
@@ -1141,11 +1156,33 @@ class DPOTrainer(Trainer):
             # Blend between logistic and exponential component based on log ratio modulation
             losses = logistic_component * (1 - log_ratio_modulation) + exp_component * log_ratio_modulation
 
+        # --- START MODIFICATION ---
+        elif self.loss_type == "w_sigmoid":
+            if epsilon is None:
+                raise ValueError("Epsilon values are required for 'w_sigmoid' loss type but were not provided.")
+            
+            base_dpo_loss = (
+            -F.logsigmoid(self.beta * logits) * (1 - self.label_smoothing)
+            - F.logsigmoid(-self.beta * logits) * self.label_smoothing
+            )
+            # Scale the loss of each item by its corresponding epsilon value.
+            # We ensure epsilon is on the same device as the loss tensor for the multiplication.
+            losses = epsilon.to(base_dpo_loss.device) * base_dpo_loss
+
+            # As requested, the calculation is left empty.
+            # The following line will raise an error until you implement your logic.
+            #raise NotImplementedError("The 'w_sigmoid' loss calculation has not been implemented.")
+        # --- END MODIFICATION ---
+
+
         else:
+            # --- START MODIFICATION ---
+            # Added 'w_sigmoid' to the error message list
             raise ValueError(
                 f"Unknown loss type: {self.loss_type}. Should be one of ['sigmoid', 'hinge', 'ipo', 'exo_pair', "
-                "'nca_pair', 'robust', 'bco_pair', 'sppo_hard', 'aot', 'aot_pair', 'discopop', 'apo_zero', 'apo_down']"
+                "'nca_pair', 'robust', 'bco_pair', 'sppo_hard', 'aot', 'aot_pair', 'discopop', 'apo_zero', 'apo_down', 'w_sigmoid']"
             )
+            # --- END MODIFICATION ---
 
         chosen_rewards = self.beta * (chosen_logps.to(device) - ref_chosen_logps.to(device)).detach()
         rejected_rewards = self.beta * (rejected_logps.to(device) - ref_rejected_logps.to(device)).detach()
@@ -1611,6 +1648,11 @@ class DPOTrainer(Trainer):
     ):
         """Compute the DPO loss and other metrics for the given batch of inputs for train or test."""
         metrics = {}
+        # --- START MODIFICATION ---
+        # Extract epsilon from the batch if it exists.
+        # This assumes your data loader and collator are providing it.
+        epsilon = batch.get("epsilon")
+        # --- END MODIFICATION -
 
         if self.args.use_liger_loss:
             model_output = self._compute_loss_liger(model, batch)
@@ -1627,9 +1669,16 @@ class DPOTrainer(Trainer):
             else:
                 ref_chosen_logps, ref_rejected_logps = self.compute_ref_log_probs(batch)
 
+            # --- START MODIFICATION ---
+        # Pass the extracted epsilon to the dpo_loss function.
             losses, chosen_rewards, rejected_rewards = self.dpo_loss(
-                model_output["chosen_logps"], model_output["rejected_logps"], ref_chosen_logps, ref_rejected_logps
+                model_output["chosen_logps"],
+                model_output["rejected_logps"],
+                ref_chosen_logps,
+                ref_rejected_logps,
+                epsilon=epsilon,
             )
+        # --- END MODIFICATION ---
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
 
         if self.args.rpo_alpha is not None:

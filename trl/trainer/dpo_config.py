@@ -334,6 +334,7 @@ class DPOConfig(TrainingArguments):
                 "discopop",
                 "apo_zero",
                 "apo_down",
+                "w_sigmoid"
             ],
         },
     )
